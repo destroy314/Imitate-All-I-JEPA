@@ -15,6 +15,8 @@ from ..util.misc import NestedTensor, is_main_process
 
 from .position_encoding import build_position_encoding
 
+from ijepa.load import load
+
 import IPython
 e = IPython.embed
 
@@ -57,6 +59,36 @@ class FrozenBatchNorm2d(torch.nn.Module):
         return x * scale + bias
 
 
+class IjepaBackbone(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.body = load(fname="ijepa/configs/in1k_vith16-448_ep300.yaml",load_path="ijepa/checkpoints/IN1K-vit.h.16-448px-300e.pth.tar")
+        self.num_channels = 1280
+
+        # self.img_size = 224
+        # patch_size = 14
+        self.img_size = 448
+        patch_size = 16
+        self.patch_num = (self.img_size // patch_size)**2
+
+    def forward(self, tensor):
+        b = tensor.shape[0]
+        all_mask = [torch.arange(self.patch_num).repeat(b, 1).to(tensor.device)]
+        # tensor: 4,3,480,640
+        # crop 480x640 -> 480x480
+        start = (640 - 480) // 2
+        tensor = tensor[:, :, :, start:start + 480]
+        # reshape 480x480 -> 224x224
+        tensor = F.interpolate(tensor, size=(self.img_size, self.img_size), mode='bilinear')
+        # 4,256,1280
+        xs = self.body(tensor, all_mask)
+        xs = F.layer_norm(xs, (xs.size(-1),))  # normalize over feature-dim
+        # 4,256,1280 -> 4,1280,256,1 变成4维来让transformer连接addition_input detr/models/transformer.py#L51
+        xs = xs.permute(0, 2, 1)
+        xs = xs.unsqueeze(-1)
+        return {'0': xs}
+
+
 class BackboneBase(nn.Module):
 
     def __init__(self, backbone: nn.Module, train_backbone: bool, num_channels: int, return_interm_layers: bool):
@@ -72,6 +104,7 @@ class BackboneBase(nn.Module):
         self.num_channels = num_channels
 
     def forward(self, tensor):
+        #4,3,480,640 -> {'0':(4,512,15,20)}
         xs = self.body(tensor)
         return xs
         # out: Dict[str, NestedTensor] = {}
@@ -117,7 +150,10 @@ def build_backbone(args):
     # TODO: build_optimizer function will use lr_backbone
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks
-    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+    if args.backbone == 'ijepa':
+        backbone = IjepaBackbone()
+    else:
+        backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
     model = Joiner(backbone, position_embedding)
     model.num_channels = backbone.num_channels
     return model

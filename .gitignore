@@ -147,6 +147,8 @@ task_configs/*
 !task_configs/loader.py
 !task_configs/config_augmentation/
 !task_configs/config_tools/
+!task_configs/act_baseline.py
+!task_configs/act_ijepa.py
 test.*
 test/
 demonstrations/
