@@ -26,6 +26,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         norm_stats,
         augmentors: dict = {},
         other_config: dict = {},
+        obs_len=1,
     ):
         super(EpisodicDataset).__init__()
         self.episode_ids = episode_ids
@@ -35,6 +36,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         self.other_config = other_config
         self.augmentors = augmentors
         self.augment_images = augmentors.get("image", None)
+        self.obs_len = obs_len
         self.__getitem__(0)
 
     def __len__(self):
@@ -51,28 +53,37 @@ class EpisodicDataset(torch.utils.data.Dataset):
             if sample_full_episode:
                 start_ts = 0
             else:
-                start_ts = np.random.choice(episode_len)
+                start_ts = np.random.choice(max(episode_len - self.obs_len + 1, 1))
+            end_ts = min(start_ts + self.obs_len, episode_len)
             # get observation at start_ts only
-            qpos = root["/observations/qpos"][start_ts]
+            qpos = root["/observations/qpos"][end_ts - 1]
             if "qvel" in self.other_config:
                 qvel = root["/observations/qvel"][start_ts]
             image_dict = dict()
             for cam_name in self.camera_names:
-                image_dict[cam_name] = root[f"/observations/images/{cam_name}"][
-                    start_ts
+                cam_images = root[f"/observations/images/{cam_name}"][
+                    start_ts:end_ts
                 ]
+                if self.obs_len == 1:
+                    cam_images = cam_images.squeeze(0)
+                image_dict[cam_name] = cam_images
             if compressed:
                 for cam_name in image_dict.keys():
                     import cv2
 
-                    decompressed_image = cv2.imdecode(image_dict[cam_name], 1)
-                    image_dict[cam_name] = np.array(decompressed_image)
+                    if self.obs_len == 1:
+                        decompressed_images = cv2.imdecode(image_dict[cam_name], 1)
+                    else:
+                        decompressed_images = []
+                        for i in range(self.obs_len):
+                            decompressed_images.append(cv2.imdecode(image_dict[cam_name][i], 1))
+                    image_dict[cam_name] = np.array(decompressed_images)
             # get all actions after and including start_ts
             # TODO: remove this hack or make it configurable
             # hack, to make timesteps more aligned
             bias = 1
-            action = root["/action"][max(0, start_ts - bias) :]
-            action_len = episode_len - max(0, start_ts - bias)
+            action = root["/action"][max(0, end_ts - 1 - bias) :]
+            action_len = episode_len - max(0, end_ts - 1 - bias)
         padded_action = np.zeros(original_action_shape, dtype=np.float32)
         padded_action[:action_len] = action
         is_pad = np.zeros(episode_len)
@@ -93,7 +104,10 @@ class EpisodicDataset(torch.utils.data.Dataset):
         is_pad = torch.from_numpy(is_pad).bool()
 
         # channel last LABEL
-        image_data = torch.einsum("k h w c -> k c h w", image_data)
+        if self.obs_len == 1:
+            image_data = torch.einsum("k h w c -> k c h w", image_data)
+        else:
+            image_data = torch.einsum("k t h w c -> k t c h w", image_data)
 
         # augment images
         if self.augment_images is not None and self.augment_images.activated:
@@ -207,11 +221,12 @@ def load_data(
     # obtain normalization stats for qpos and action
     norm_stats = get_norm_stats(dataset_dir, num_episodes, other_config)
 
+    obs_len = other_config.get("obs_len",1)
     # construct dataset
     train_dataset = EpisodicDataset(
-        train_indices, dataset_dir, camera_names, norm_stats, augmentors
+        train_indices, dataset_dir, camera_names, norm_stats, augmentors, obs_len=obs_len
     )
-    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats)
+    val_dataset = EpisodicDataset(val_indices, dataset_dir, camera_names, norm_stats,obs_len=obs_len)
     # construct dataloader
     print("batch_size_train:", batch_size_train)
     print("batch_size_val:", batch_size_val)

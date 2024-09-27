@@ -88,7 +88,7 @@ class DETRVAE(nn.Module):
     def forward(self, qpos, image, env_state, actions=None, is_pad=None):
         """
         qpos: batch, qpos_dim
-        image: batch, num_cam, channel, height, width
+        image: batch, num_cam, [obs_len, ]channel, height, width
         env_state: ??? usually None
         actions: batch, seq, action_dim
         """     

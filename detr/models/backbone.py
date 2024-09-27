@@ -6,12 +6,15 @@ Backbone modules.
 import torch
 import torchvision
 from torch import nn
+import torch.nn.functional as F
 from torchvision.models._utils import IntermediateLayerGetter
 from typing import List
 from ..util.misc import NestedTensor, is_main_process
 from .position_encoding import build_position_encoding
 
 from detr.encoders.images_hl_dyh.images_hl_dyh import MultiImageObsEncoder
+
+from jepa.evals.video_classification_frozen.eval import init_model
 
 
 class FrozenBatchNorm2d(torch.nn.Module):
@@ -52,6 +55,54 @@ class FrozenBatchNorm2d(torch.nn.Module):
         bias = b - rm * scale
         return x * scale + bias
 
+class VjepaBackbone(nn.Module):
+    def __init__(self):
+        super().__init__()
+        device = torch.device('cuda:0')
+        torch.cuda.set_device(device)
+
+        # from jepa/configs/evals/vith16_384_k400_16x8x3.yaml
+        patch_size = 16
+        self.body = init_model(
+            crop_size=384,
+            device=device,
+            pretrained="jepa/cheakpoints/vith16-384.pth.tar",
+            model_name="vit_huge",
+            patch_size=patch_size,
+            tubelet_size=2,
+            frames_per_clip=16,
+            uniform_power=True,
+            checkpoint_key="target_encoder",
+            use_SiLU=False,
+            tight_SiLU=False,
+            use_sdpa=True)
+        for param in self.body.parameters():
+            param.requires_grad = False
+        self.body.eval()
+        self.num_channels = 1280
+
+        self.img_size = 384
+        self.patch_num = (self.img_size // patch_size)**2
+
+    def forward(self, tensor):
+        #tensor: 4,16,3,480,640
+        #needed: b,c=3,t=16,h=384,w=384
+        tensor = tensor.permute(0, 2, 1, 3, 4)
+        # crop 480x640 -> 480x480
+        start = (640 - 480) // 2
+        tensor = tensor[..., start:start + 480]
+        # reshape 480x480 -> 384x384
+        batch_size, channels, time_steps, height, width = tensor.shape
+        tensor = tensor.reshape(batch_size * time_steps, channels, height, width)
+        tensor = F.interpolate(tensor, size=(self.img_size, self.img_size), mode='bilinear')
+        tensor = tensor.reshape(batch_size, channels, time_steps, self.img_size, self.img_size)
+        # 4,4608,1280
+        xs = self.body(tensor)
+        xs = F.layer_norm(xs, (xs.size(-1),))  # normalize over feature-dim
+        # 4,4608,1280 -> 4,1280,4608,1 变成4维来让transformer连接addition_input detr/models/transformer.py#L51
+        xs = xs.permute(0, 2, 1)
+        xs = xs.unsqueeze(-1)
+        return {'0': xs}
 
 class BackboneBase(nn.Module):
 
@@ -126,7 +177,10 @@ def build_backbone(args):
     # TODO: build_optimizer function will use lr_backbone
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks
-    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+    if args.backbone == 'vjepa':
+        backbone = VjepaBackbone()
+    else:
+        backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
     model = Joiner(backbone, position_embedding)
     model.num_channels = backbone.num_channels
     return model
