@@ -252,9 +252,12 @@ def plot_history(train_history, validation_history, num_epochs, stats_dir, seed)
         plot_path = os.path.join(stats_dir, f'train_val_{key}_seed_{seed}.png')
         plt.figure()
         train_values = [summary[key].item() for summary in train_history]
-        val_values = [summary[key].item() for summary in validation_history]
         plt.plot(np.linspace(0, num_epochs-1, len(train_history)), train_values, label='train')
-        plt.plot(np.linspace(0, num_epochs-1, len(validation_history)), val_values, label='validation')
+        try:
+            val_values = [summary[key].item() for summary in validation_history]
+            plt.plot(np.linspace(0, num_epochs-1, len(validation_history)), val_values, label='validation')
+        except:
+            pass
         # plt.ylim([-0.1, 1])
         plt.tight_layout()
         plt.legend()
